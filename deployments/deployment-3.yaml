@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-container-3
+  namespace: demo-aaa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-debug
+  template:
+    metadata:
+      labels:
+        app: simple-debug
+    spec:
+      containers:
+        - name: simple-debug
+          image: curlimages/curl:8.5.0
+          command: ["/bin/sh", "-c", "while true; do sleep 3600; done"]
+          workingDir: /work
+          volumeMounts:
+            - name: workdir
+              mountPath: /work
+      volumes:
+        - name: workdir
+          emptyDir: {}

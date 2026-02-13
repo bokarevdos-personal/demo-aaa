@@ -1,0 +1,37 @@
+apiVersion: config.stackrox.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: acs-demo-unauth-terminal-kill-pod
+  namespace: rhacs-operator
+spec:
+  policyName: Forbid kubectl exec (terminal access) # Policy name visible at ACS
+  description: Block kubectl exec and oc rsh into application pods
+  categories:
+    - Anomalous Activity
+  lifecycleStages:
+    - RUNTIME
+  eventSource: DEPLOYMENT_EVENT
+  scope:
+    - namespace: acs-process-exec-demo
+      cluster: df6a829e-7bda-4a93-9668-9489932bbef7
+      label:
+        key: app
+        value: nginx-process-exec-demo
+  severity: HIGH_SEVERITY
+  enforcementActions:
+    - KILL_POD_ENFORCEMENT
+  policySections:
+    - policyGroups:
+        - fieldName: Process Name
+          booleanOperator: OR
+          values:
+            - value: sh
+            - value: bash
+            - value: zsh
+        - fieldName: Process Arguments
+          values:
+            - value: -i
+  notifiers: 
+    - email-api
+  disabled: false
+  isDefault: false
