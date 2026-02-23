@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    // OpenShift API (credential Secret text, но мы будем выбирать порт сами)
+    // OpenShift API (credential Secret text)
     OCP_API_URL = credentials('ocp-api-url')
 
     // RHACS
@@ -40,14 +40,14 @@ pipeline {
           echo "=== Pick working endpoint ==="
           if curl -sk --connect-timeout 5 --max-time 10 "https://$BASE_HOST:6443/version" >/dev/null 2>&1; then
             echo "https://$BASE_HOST:6443" > .ocp_server
-            echo "Chosen endpoint: $(cat .ocp_server)"
           elif curl -sk --connect-timeout 5 --max-time 10 "https://$BASE_HOST:443/version" >/dev/null 2>&1; then
             echo "https://$BASE_HOST:443" > .ocp_server
-            echo "Chosen endpoint: $(cat .ocp_server)"
           else
             echo "ERROR: neither 6443 nor 443 responded to /version from this Jenkins node."
             exit 2
           fi
+
+          echo "Chosen endpoint: $(cat .ocp_server)"
         '''
       }
     }
@@ -99,26 +99,34 @@ pipeline {
         sh '''
           set -euo pipefail
 
-          echo "Repo tree:"
-          ls -la
-          echo "Policies:"
-          ls -la policies || true
-
           echo "Apply SecurityPolicy manifests to cluster..."
-          # В твоих yaml namespace rhacs-operator задан в metadata, так что можно применять как есть.
           oc apply -f policies/
 
-          echo "Show SecurityPolicy objects (if CRD installed):"
-          # Название ресурса может быть securitypolicies / securitypolicy — проверим через api-resources
-          if oc api-resources | awk '{print $1}' | grep -qi "^securitypolic"; then
-            RES=$(oc api-resources | awk '{print $1}' | grep -i "^securitypolic" | head -n1)
-            echo "Detected resource: $RES"
-            oc get "$RES" -n rhacs-operator || true
-          else
-            echo "WARNING: SecurityPolicy CRD not found in cluster. Check RHACS operator installation / CRDs."
+          echo "Detect SecurityPolicy resource name..."
+          # На разных версиях может отличаться, но у тебя точно есть securitypolicies
+          RES="$(oc api-resources --api-group=config.stackrox.io -o name | grep -E '^securitypolic' | head -n1 || true)"
+
+          if [ -z "$RES" ]; then
+            echo "ERROR: SecurityPolicy resource not found in api-resources for api-group=config.stackrox.io"
             oc api-resources | grep -i stackrox || true
             exit 3
           fi
+
+          echo "Using resource: $RES"
+
+          echo "List SecurityPolicies in rhacs-operator:"
+          oc get "$RES" -n rhacs-operator -o wide || true
+
+          echo "Show applied objects (names):"
+          # Печатаем имена файлов и имена CR
+          for f in policies/*.yaml; do
+            echo "---- $f ----"
+            # безопасно: вытащим metadata.name
+            NAME=$(awk '/^metadata:/ {m=1} m && /^  name:/ {print $2; exit}' "$f" || true)
+            if [ -n "$NAME" ]; then
+              oc get "$RES" -n rhacs-operator "$NAME" -o yaml | head -n 60 || true
+            fi
+          done
         '''
       }
     }
