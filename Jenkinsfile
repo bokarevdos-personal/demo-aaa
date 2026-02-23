@@ -12,7 +12,6 @@ pipeline {
 
   options {
     skipDefaultCheckout(true)
-    timestamps()
   }
 
   stages {
@@ -37,7 +36,6 @@ pipeline {
           getent hosts "$HOST" || true
 
           echo "TCP check (best-effort):"
-          # если nc есть — проверим порт
           if command -v nc >/dev/null 2>&1; then
             PORT=$(echo "$OCP_API_URL" | sed -E 's#https?://##' | cut -d/ -f1 | awk -F: '{print ($2==""?443:$2)}')
             echo "PORT=$PORT"
@@ -47,7 +45,6 @@ pipeline {
           fi
 
           echo "HTTP checks:"
-          # /version и /readyz обычно доступны без auth и быстро показывают, жив ли API
           curl -vk --connect-timeout 10 --max-time 20 "$OCP_API_URL/version" || true
           curl -vk --connect-timeout 10 --max-time 20 "$OCP_API_URL/readyz"  || true
         '''
@@ -61,7 +58,6 @@ pipeline {
             set -euo pipefail
 
             echo "Logging in to OpenShift (debug enabled)..."
-            # loglevel=8 даст подробности, почему EOF (TLS, proxy, route, etc.)
             oc login "$OCP_API_URL" -u kubeadmin -p "$OCP_PASSWORD" \
               --insecure-skip-tls-verify=true \
               --request-timeout=30s \
