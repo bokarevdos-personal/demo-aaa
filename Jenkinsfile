@@ -2,12 +2,9 @@ pipeline {
   agent any
 
   environment {
-    // RHACS
-    ROX_CENTRAL_ADDRESS = credentials('rhacs-central-address') // Secret text
-    ROX_API_TOKEN       = credentials('rhacs-api-token')       // Secret text
-
-    // OpenShift API URL (добавь credential типа Secret text с этим id)
-    OCP_API_URL         = credentials('ocp-api-url')
+    OCP_API_URL = credentials('ocp-api-url')
+    ROX_CENTRAL_ADDRESS = credentials('rhacs-central-address')
+    ROX_API_TOKEN       = credentials('rhacs-api-token')
   }
 
   stages {
