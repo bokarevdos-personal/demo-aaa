@@ -95,10 +95,11 @@ pipeline {
 
             kubectl version --client=true
 
-            kubectl apply -f policies/k8s/00-namespace.yaml
-            kubectl apply -f policies/k8s/
+            kubectl apply -f policies/acs-demo-unauth-process-exec-kill-pod.yaml
+            kubectl apply -f policies/acs-demo-unauth-terminal-kill-pod-labeled.yaml
+            kubectl apply -f policies/acs-demo-unauth-terminal-kill-pod.yaml
 
-            kubectl -n demo-policy get networkpolicy -o wide
+            kubectl -n rhacs-operator get networkpolicy -o wide
           '''
         }
       }
