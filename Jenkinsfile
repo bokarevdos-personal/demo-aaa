@@ -2,14 +2,49 @@ pipeline {
   agent any
 
   environment {
-    // Адрес Central (лучше хранить как credential, но для примера env)
+    // RHACS
     ROX_CENTRAL_ADDRESS = credentials('rhacs-central-address') // Secret text
     ROX_API_TOKEN       = credentials('rhacs-api-token')       // Secret text
+
+    // OpenShift API URL (добавь credential типа Secret text с этим id)
+    OCP_API_URL         = credentials('ocp-api-url')
   }
 
   stages {
+
     stage('Checkout') {
       steps { checkout scm }
+    }
+
+    stage('Login to OpenShift + list pipelines') {
+      steps {
+        withCredentials([string(credentialsId: 'kubeadmin-secret', variable: 'OCP_PASSWORD')]) {
+          sh '''
+            set -euo pipefail
+
+            echo "Logging in to OpenShift..."
+            oc version || true
+
+            # Логин (kubeadmin + пароль из Jenkins secret)
+            oc login "$OCP_API_URL" -u kubeadmin -p "$OCP_PASSWORD" --insecure-skip-tls-verify=true
+
+            echo "Who am I?"
+            oc whoami
+            oc whoami --show-server
+
+            echo "Namespaces:"
+            oc get ns | head -n 50 || true
+
+            echo "Pipelines (Tekton) across all namespaces (if installed):"
+            # В OpenShift Pipelines (Tekton) ресурс называется pipelines.tekton.dev
+            # Если Tekton не установлен — команда упадет, поэтому делаем мягко.
+            oc get pipelines.tekton.dev -A || echo "Tekton Pipelines not found (CRD pipelines.tekton.dev is missing)."
+
+            echo "PipelineRuns (optional):"
+            oc get pipelineruns.tekton.dev -A || true
+          '''
+        }
+      }
     }
 
     stage('K8s Policy Sync (kubectl apply)') {
@@ -26,7 +61,7 @@ pipeline {
 
             # Синк политик
             kubectl apply -f policies/k8s/
-            
+
             # Быстрая проверка: вывести примененные NetworkPolicy
             kubectl -n demo-policy get networkpolicy -o wide
           '''
@@ -39,10 +74,6 @@ pipeline {
         sh '''
           set -euo pipefail
 
-          # Вариант 1: если roxctl установлен на агенте
-          # roxctl version
-
-          # Вариант 2: запуск roxctl из контейнера (часто проще и воспроизводимо)
           docker run --rm \
             -e ROX_API_TOKEN="$ROX_API_TOKEN" \
             -e ROX_CENTRAL_ADDRESS="$ROX_CENTRAL_ADDRESS" \
@@ -57,8 +88,6 @@ pipeline {
         sh '''
           set -euo pipefail
 
-          # Пример: проверить манифест деплоймента на нарушения policy в Central.
-          # (Подставьте ваш файл/директорию с манифестами)
           docker run --rm \
             -e ROX_API_TOKEN="$ROX_API_TOKEN" \
             -e ROX_CENTRAL_ADDRESS="$ROX_CENTRAL_ADDRESS" \
