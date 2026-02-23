@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    // текущий URL из Jenkins credential (как у тебя сейчас)
+    // OpenShift API (credential Secret text, но мы будем выбирать порт сами)
     OCP_API_URL = credentials('ocp-api-url')
 
     // RHACS
@@ -32,76 +32,94 @@ pipeline {
           getent hosts "$BASE_HOST" || true
 
           echo "=== Test 443 ==="
-          curl -vk --connect-timeout 10 --max-time 20 "https://$BASE_HOST:443/version" || true
-          echo "--- TLS1.2 forced (443) ---"
-          curl -vk --tlsv1.2 --connect-timeout 10 --max-time 20 "https://$BASE_HOST:443/version" || true
+          curl -vk --connect-timeout 10 --max-time 15 "https://$BASE_HOST:443/version" || true
 
           echo "=== Test 6443 ==="
-          curl -vk --connect-timeout 10 --max-time 20 "https://$BASE_HOST:6443/version" || true
-          echo "--- TLS1.2 forced (6443) ---"
-          curl -vk --tlsv1.2 --connect-timeout 10 --max-time 20 "https://$BASE_HOST:6443/version" || true
+          curl -vk --connect-timeout 10 --max-time 15 "https://$BASE_HOST:6443/version" || true
 
           echo "=== Pick working endpoint ==="
           if curl -sk --connect-timeout 5 --max-time 10 "https://$BASE_HOST:6443/version" >/dev/null 2>&1; then
-            echo "Chosen endpoint: https://$BASE_HOST:6443"
             echo "https://$BASE_HOST:6443" > .ocp_server
+            echo "Chosen endpoint: $(cat .ocp_server)"
           elif curl -sk --connect-timeout 5 --max-time 10 "https://$BASE_HOST:443/version" >/dev/null 2>&1; then
-            echo "Chosen endpoint: https://$BASE_HOST:443"
             echo "https://$BASE_HOST:443" > .ocp_server
+            echo "Chosen endpoint: $(cat .ocp_server)"
           else
             echo "ERROR: neither 6443 nor 443 responded to /version from this Jenkins node."
-            echo "This is a network/LB/TLS issue between Jenkins and API endpoint."
             exit 2
           fi
         '''
       }
     }
 
-    stage('Login to OpenShift + list pipelines') {
+    stage('Login to OpenShift') {
       steps {
         withCredentials([string(credentialsId: 'kubeadmin-secret', variable: 'OCP_PASSWORD')]) {
           sh '''
             set -euo pipefail
 
-            SERVER=$(cat .ocp_server)
+            SERVER="$(cat .ocp_server)"
             echo "Logging in to OpenShift server: $SERVER"
 
             oc version || true
 
             oc login "$SERVER" -u kubeadmin -p "$OCP_PASSWORD" \
               --insecure-skip-tls-verify=true \
-              --request-timeout=30s \
-              --loglevel=8
+              --request-timeout=30s
 
             oc whoami
             oc whoami --show-server
-
-            echo "Pipelines (Tekton) across all namespaces (if installed):"
-            oc get pipelines.tekton.dev -A || echo "Tekton Pipelines not found (CRD pipelines.tekton.dev is missing)."
-
-            echo "PipelineRuns:"
-            oc get pipelineruns.tekton.dev -A || true
           '''
         }
       }
     }
 
-    stage('K8s Policy Sync (kubectl apply)') {
+    stage('Cluster info + Pipelines check') {
       steps {
-        withCredentials([file(credentialsId: 'kubeconfig-acs-cluster', variable: 'KUBECONFIG_FILE')]) {
-          sh '''
-            set -euo pipefail
-            export KUBECONFIG="$KUBECONFIG_FILE"
+        sh '''
+          set -euo pipefail
 
-            kubectl version --client=true
+          echo "Namespaces (top 50):"
+          oc get ns | head -n 50 || true
 
-            kubectl apply -f policies/acs-demo-unauth-process-exec-kill-pod.yaml
-            kubectl apply -f policies/acs-demo-unauth-terminal-kill-pod-labeled.yaml
-            kubectl apply -f policies/acs-demo-unauth-terminal-kill-pod.yaml
+          echo "Tekton check:"
+          if oc api-resources | awk '{print $1}' | grep -qx "pipelines"; then
+            echo "Tekton CRDs present. Listing Pipelines:"
+            oc get pipelines -A || true
+            oc get pipelineruns -A || true
+          else
+            echo "Tekton Pipelines NOT installed (no pipelines resource)."
+          fi
+        '''
+      }
+    }
 
-            kubectl -n rhacs-operator get networkpolicy -o wide
-          '''
-        }
+    stage('Policy sync to cluster (RHACS SecurityPolicy CRD)') {
+      steps {
+        sh '''
+          set -euo pipefail
+
+          echo "Repo tree:"
+          ls -la
+          echo "Policies:"
+          ls -la policies || true
+
+          echo "Apply SecurityPolicy manifests to cluster..."
+          # В твоих yaml namespace rhacs-operator задан в metadata, так что можно применять как есть.
+          oc apply -f policies/
+
+          echo "Show SecurityPolicy objects (if CRD installed):"
+          # Название ресурса может быть securitypolicies / securitypolicy — проверим через api-resources
+          if oc api-resources | awk '{print $1}' | grep -qi "^securitypolic"; then
+            RES=$(oc api-resources | awk '{print $1}' | grep -i "^securitypolic" | head -n1)
+            echo "Detected resource: $RES"
+            oc get "$RES" -n rhacs-operator || true
+          else
+            echo "WARNING: SecurityPolicy CRD not found in cluster. Check RHACS operator installation / CRDs."
+            oc api-resources | grep -i stackrox || true
+            exit 3
+          fi
+        '''
       }
     }
 
@@ -119,22 +137,33 @@ pipeline {
       }
     }
 
-    stage('ACS Check Example (deployment check)') {
+    stage('ACS Check deployments in repo (optional)') {
       steps {
         sh '''
           set -euo pipefail
 
-          if [ ! -f "manifests/deployment.yaml" ]; then
-            echo "manifests/deployment.yaml not found - skipping check (example stage)."
+          if [ ! -d "deployments" ]; then
+            echo "No deployments/ directory, skipping."
             exit 0
           fi
 
-          docker run --rm \
-            -e ROX_API_TOKEN="$ROX_API_TOKEN" \
-            -e ROX_CENTRAL_ADDRESS="$ROX_CENTRAL_ADDRESS" \
-            -v "$PWD:/work" -w /work \
-            registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel8:4.8.8 \
-            roxctl deployment check -f /work/manifests/deployment.yaml -o table
+          shopt -s nullglob
+          files=(deployments/*.yaml deployments/*.yml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No deployment yaml files in deployments/, skipping."
+            exit 0
+          fi
+
+          echo "Running roxctl deployment check on repo deployments..."
+          for f in "${files[@]}"; do
+            echo "== Checking $f =="
+            docker run --rm \
+              -e ROX_API_TOKEN="$ROX_API_TOKEN" \
+              -e ROX_CENTRAL_ADDRESS="$ROX_CENTRAL_ADDRESS" \
+              -v "$PWD:/work" -w /work \
+              registry.redhat.io/advanced-cluster-security/rhacs-roxctl-rhel8:4.8.8 \
+              roxctl deployment check -f "/work/$f" -o table
+          done
         '''
       }
     }
