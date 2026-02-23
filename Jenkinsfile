@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    // OpenShift API
+    // текущий URL из Jenkins credential (как у тебя сейчас)
     OCP_API_URL = credentials('ocp-api-url')
 
     // RHACS
@@ -20,33 +20,39 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('OpenShift connectivity diagnostics') {
+    stage('OpenShift connectivity diagnostics (443/6443)') {
       steps {
         sh '''
           set -euo pipefail
 
-          echo "OCP_API_URL=$OCP_API_URL"
+          echo "Configured OCP_API_URL=$OCP_API_URL"
 
-          echo "oc version:"
-          oc version || true
+          BASE_HOST=$(echo "$OCP_API_URL" | sed -E 's#https?://##' | cut -d/ -f1 | cut -d: -f1)
+          echo "BASE_HOST=$BASE_HOST"
+          getent hosts "$BASE_HOST" || true
 
-          echo "DNS check:"
-          HOST=$(echo "$OCP_API_URL" | sed -E 's#https?://##' | cut -d/ -f1 | cut -d: -f1)
-          echo "HOST=$HOST"
-          getent hosts "$HOST" || true
+          echo "=== Test 443 ==="
+          curl -vk --connect-timeout 10 --max-time 20 "https://$BASE_HOST:443/version" || true
+          echo "--- TLS1.2 forced (443) ---"
+          curl -vk --tlsv1.2 --connect-timeout 10 --max-time 20 "https://$BASE_HOST:443/version" || true
 
-          echo "TCP check (best-effort):"
-          if command -v nc >/dev/null 2>&1; then
-            PORT=$(echo "$OCP_API_URL" | sed -E 's#https?://##' | cut -d/ -f1 | awk -F: '{print ($2==""?443:$2)}')
-            echo "PORT=$PORT"
-            nc -vz -w 5 "$HOST" "$PORT" || true
+          echo "=== Test 6443 ==="
+          curl -vk --connect-timeout 10 --max-time 20 "https://$BASE_HOST:6443/version" || true
+          echo "--- TLS1.2 forced (6443) ---"
+          curl -vk --tlsv1.2 --connect-timeout 10 --max-time 20 "https://$BASE_HOST:6443/version" || true
+
+          echo "=== Pick working endpoint ==="
+          if curl -sk --connect-timeout 5 --max-time 10 "https://$BASE_HOST:6443/version" >/dev/null 2>&1; then
+            echo "Chosen endpoint: https://$BASE_HOST:6443"
+            echo "https://$BASE_HOST:6443" > .ocp_server
+          elif curl -sk --connect-timeout 5 --max-time 10 "https://$BASE_HOST:443/version" >/dev/null 2>&1; then
+            echo "Chosen endpoint: https://$BASE_HOST:443"
+            echo "https://$BASE_HOST:443" > .ocp_server
           else
-            echo "nc not installed, skipping"
+            echo "ERROR: neither 6443 nor 443 responded to /version from this Jenkins node."
+            echo "This is a network/LB/TLS issue between Jenkins and API endpoint."
+            exit 2
           fi
-
-          echo "HTTP checks:"
-          curl -vk --connect-timeout 10 --max-time 20 "$OCP_API_URL/version" || true
-          curl -vk --connect-timeout 10 --max-time 20 "$OCP_API_URL/readyz"  || true
         '''
       }
     }
@@ -57,23 +63,23 @@ pipeline {
           sh '''
             set -euo pipefail
 
-            echo "Logging in to OpenShift (debug enabled)..."
-            oc login "$OCP_API_URL" -u kubeadmin -p "$OCP_PASSWORD" \
+            SERVER=$(cat .ocp_server)
+            echo "Logging in to OpenShift server: $SERVER"
+
+            oc version || true
+
+            oc login "$SERVER" -u kubeadmin -p "$OCP_PASSWORD" \
               --insecure-skip-tls-verify=true \
               --request-timeout=30s \
               --loglevel=8
 
-            echo "Who am I?"
             oc whoami
             oc whoami --show-server
-
-            echo "Namespaces:"
-            oc get ns | head -n 50 || true
 
             echo "Pipelines (Tekton) across all namespaces (if installed):"
             oc get pipelines.tekton.dev -A || echo "Tekton Pipelines not found (CRD pipelines.tekton.dev is missing)."
 
-            echo "PipelineRuns (optional):"
+            echo "PipelineRuns:"
             oc get pipelineruns.tekton.dev -A || true
           '''
         }
